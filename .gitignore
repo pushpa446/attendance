@@ -15,3 +15,8 @@ attendance*.png
 
 # OS files
 .DS_Store
+
+bin/
+include/
+lib/
+pyvenv.cfg
