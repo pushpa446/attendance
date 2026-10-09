@@ -1,25 +1,38 @@
 """
-Usage: python mark.py --id LOGIN_ID --password 'PASSWORD' 27 29 32
+Usage: python mark.py 27 29 32
 (27 29 32 = Sn. numbers of ABSENT students; none = all present)
 
-Opens a normal, visible Brave window, fills your ID and password, waits for you to
-pass the Cloudflare check and press Enter, then marks the attendance.
+URL, LOGIN_ID and PASSWORD are read from the .env file next to this script.
 """
-import sys
 import re
+import sys
 import time
 import shutil
-import argparse
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--id")
-parser.add_argument("--password")
-parser.add_argument("absent", nargs="*")
-args = parser.parse_args()
-absent = set(args.absent)
+
+def load_env(path):
+    env = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            env[key.strip()] = value.strip().strip('"').strip("'")
+    return env
+
+
+env_file = Path(__file__).with_name(".env")
+if not env_file.exists():
+    sys.exit("Missing .env file. Copy .env.example to .env and fill it in.")
+env = load_env(env_file)
+URL, LOGIN_ID, PASSWORD = env.get("URL"), env.get("LOGIN_ID"), env.get("PASSWORD")
+if not (URL and LOGIN_ID and PASSWORD):
+    sys.exit(".env must contain URL, LOGIN_ID and PASSWORD.")
+host = urlparse(URL).netloc
+absent = set(sys.argv[1:])
 
 brave = next(
     (
@@ -45,7 +58,7 @@ subprocess.Popen(
         brave,
         "--remote-debugging-port=9222",
         f"--user-data-dir={Path.home() / '.attendance-chrome'}",
-        "https://samagam.kvs.gov.in/?login=1",
+        URL,
     ],
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
@@ -54,9 +67,9 @@ time.sleep(3)
 
 with sync_playwright() as p:
     browser = p.chromium.connect_over_cdp("http://localhost:9222")
-    pages = [pg for c in browser.contexts for pg in c.pages if "samagam.kvs.gov.in" in pg.url]
+    pages = [pg for c in browser.contexts for pg in c.pages if host in pg.url]
     if not pages:
-        sys.exit("No Samagam tab found in the Brave window.")
+        sys.exit("Portal tab not found in the Brave window.")
     page = pages[0]
     page.bring_to_front()
 
@@ -72,11 +85,9 @@ with sync_playwright() as p:
         print("Already logged in.")
     else:
         print("Not logged in, filling login form...")
-        if not (args.id and args.password):
-            sys.exit("Not logged in. Run again with --id and --password.")
-        login_box.first.fill(args.id)
-        page.get_by_placeholder("Enter Your Password").fill(args.password)
-        input("Wait for Cloudflare 'Success!', then press Enter to login... ")
+        login_box.first.fill(LOGIN_ID)
+        page.get_by_placeholder("Enter Your Password").fill(PASSWORD)
+        input("Wait for the verification to succeed, then press Enter to login... ")
         page.get_by_role("button", name="Login").click()
         page.wait_for_load_state("domcontentloaded")
         time.sleep(3)
