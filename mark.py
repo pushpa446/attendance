@@ -1,144 +1,125 @@
-#!/usr/bin/env python3
 """
-Samagam attendance helper (semi-automatic).
+Usage: python mark.py --id LOGIN_ID --password 'PASSWORD' 27 29 32
+(27 29 32 = Sn. numbers of ABSENT students; none = all present)
 
-Usage:
-    python mark.py 4 12 17     # Sn. 4, 12, 17 are ABSENT (everyone else stays Present)
-    python mark.py             # everyone present
-
-Flow:
-  1. Opens a visible Chrome window (saved profile, so logins/Cloudflare checks persist).
-  2. Logs in: if SAMAGAM_ID and SAMAGAM_PASS environment variables are set, it fills
-     them in, waits for Cloudflare to say Success, and clicks Login by itself.
-     Otherwise YOU log in and press Enter in the terminal.
-  3. Script clicks through the menu to the attendance page (NAV_STEPS).
-  4. Leaves everyone Present (portal default) and sets only the listed Sn. numbers Absent.
-  5. Aborts if any Sn. number is not found. Otherwise saves and takes a screenshot.
-   (No weekend or holiday check: it marks whenever you run it.)
-
-Setup (once):
-    python3 -m venv ~/attendance && source ~/attendance/bin/activate
-    pip install playwright && playwright install chromium
+Opens a normal, visible Brave window, fills your ID and password, waits for you to
+pass the Cloudflare check and press Enter, then marks the attendance.
 """
 import sys
-import os
-import datetime
+import re
+import time
+import shutil
+import argparse
+import subprocess
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-# ------------------------- CONFIG (edit these) -------------------------
-LOGIN_URL = "https://samagam.kvs.gov.in/"
+parser = argparse.ArgumentParser()
+parser.add_argument("--id")
+parser.add_argument("--password")
+parser.add_argument("absent", nargs="*")
+args = parser.parse_args()
+absent = set(args.absent)
 
-# Menu clicks after login, by visible text, in order. FILL THESE IN.
-NAV_STEPS = [
-    "SIS",
-    "Attendance",
-    "Mark Attendance",
-    "View / Edit",      # button on the Class 6 Section A card
-]
-
-# Optional: direct attendance URL (leave "" if none)
-ATTENDANCE_URL = ""
-
-# Class/section selection on the attendance page (leave empty if not needed)
-# Example: {"Class": "Class 5", "Section": "A"}
-FILTERS = {}
-
-# One row per student
-ROW_SELECTOR = "table tbody tr"
-# Element inside a row that contains the Sn. (serial number, 1st column)
-ROLL_SELECTOR = "td:nth-child(1)"
-
-# "dropdown" -> a <select> in each row; "toggle" -> buttons/labels with text
-MODE = "dropdown"
-PRESENT_LABEL = "Present"
-ABSENT_LABEL = "Absent"
-DROPDOWN_SELECTOR = "select"          # used when MODE = "dropdown"
-
-SUBMIT_TEXT = "Save"
-PROFILE_DIR = str(Path.home() / ".attendance-profile")
-# -----------------------------------------------------------------------
-
-
-def set_status(row, label):
-    if MODE == "dropdown":
-        row.locator(DROPDOWN_SELECTOR).first.select_option(label=label)
-    else:
-        row.get_by_text(label, exact=True).first.click()
-
-
-def main():
-    absent = {a.strip() for a in sys.argv[1:] if a.strip()}
-    today = datetime.date.today()
-
-    print(f"Date: {today}  | Absent Sn. numbers: {sorted(absent) or 'none'}")
-
-    with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            PROFILE_DIR, headless=False,channel="chrome", 
-args=["--start-maximized"], no_viewport=True
+brave = next(
+    (
+        b
+        for b in (
+            shutil.which("brave-browser"),
+            shutil.which("brave-browser-stable"),
+            shutil.which("brave"),
+            "/snap/bin/brave",
+            "/opt/brave.com/brave/brave-browser",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            str(Path.home() / "Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
         )
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        page.goto(LOGIN_URL)
+        if b and Path(b).exists()
+    ),
+    None,
+)
+if not brave:
+    sys.exit("Brave not found. Run: which brave brave-browser   and edit the path in mark.py")
 
-        login_id = os.environ.get("SAMAGAM_ID")
-        password = os.environ.get("SAMAGAM_PASS")
-        if login_id and password:
-            page.get_by_placeholder("Enter Your Login ID").fill(login_id)
-            page.get_by_placeholder("Enter Your Password").fill(password)
-            try:
-                page.frame_locator("iframe[src*='challenges.cloudflare.com']").get_by_text(
-                    "Success!"
-                ).wait_for(timeout=30000)
-            except Exception:
-                input("Cloudflare not confirmed. Complete it manually, then press Enter... ")
-            page.get_by_role("button", name="Login").click()
-            page.wait_for_load_state("networkidle")
-        else:
-            input("Log in (and pass any check) in the browser, then press Enter here... ")
+subprocess.Popen(
+    [
+        brave,
+        "--remote-debugging-port=9222",
+        f"--user-data-dir={Path.home() / '.attendance-chrome'}",
+        "https://samagam.kvs.gov.in/?login=1",
+    ],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+time.sleep(3)
 
-        if ATTENDANCE_URL:
-            page.goto(ATTENDANCE_URL)
-        for text in NAV_STEPS:
-            page.get_by_text(text, exact=(text != "View / Edit")).first.click()
-            page.wait_for_load_state("networkidle")
+with sync_playwright() as p:
+    browser = p.chromium.connect_over_cdp("http://localhost:9222")
+    pages = [pg for c in browser.contexts for pg in c.pages if "samagam.kvs.gov.in" in pg.url]
+    if not pages:
+        sys.exit("No Samagam tab found in the Brave window.")
+    page = pages[0]
+    page.bring_to_front()
 
-        for label, value in FILTERS.items():
-            page.get_by_label(label).select_option(label=value)
-            page.wait_for_load_state("networkidle")
+    # Login (skipped if the saved Brave profile is already logged in)
+    page.wait_for_load_state("domcontentloaded")
+    time.sleep(3)  # let redirects finish
+    login_box = page.get_by_placeholder("Enter Your Login ID")
+    print("Page:", page.url)
+    logged_in = any(k in page.url for k in ("/dashboard", "/dashboar", "/mis/")) or not (
+        login_box.count() and login_box.first.is_visible()
+    )
+    if logged_in:
+        print("Already logged in.")
+    else:
+        print("Not logged in, filling login form...")
+        if not (args.id and args.password):
+            sys.exit("Not logged in. Run again with --id and --password.")
+        login_box.first.fill(args.id)
+        page.get_by_placeholder("Enter Your Password").fill(args.password)
+        input("Wait for Cloudflare 'Success!', then press Enter to login... ")
+        page.get_by_role("button", name="Login").click()
+        page.wait_for_load_state("domcontentloaded")
+        time.sleep(3)
+    print("Opening attendance page...")
 
-        page.wait_for_selector(ROW_SELECTOR)
-        page.once("dialog", lambda d: d.accept())  # accept any confirm popup after Save
-
-        rows = page.locator(ROW_SELECTOR)
-        count = rows.count()
-        if count == 0:
-            sys.exit("No student rows found. Check ROW_SELECTOR.")
-
-        found = set()
-        for i in range(count):
-            row = rows.nth(i)
-            sn = row.locator(ROLL_SELECTOR).first.inner_text().strip()
-            if sn in absent:
-                set_status(row, ABSENT_LABEL)
-                found.add(sn)
-            # everyone else is left untouched (portal default is Present)
-
-        missing = absent - found
-        if missing:
-            sys.exit(f"Sn. numbers not found: {sorted(missing)}. NOT saved.")
-
-        print(f"Students: {count} | Absent: {len(found)} | Present: {count - len(found)}")
-        shot = f"attendance_{today.isoformat()}.png"
-        page.screenshot(path=shot, full_page=True)
-
-        page.get_by_role("button", name=SUBMIT_TEXT).first.click()
+    # Go to attendance
+    for text in ["SIS", "Attendance", "Mark Attendance"]:
+        page.get_by_text(text, exact=True).first.click()
         page.wait_for_load_state("networkidle")
-        page.screenshot(path=f"attendance_{today.isoformat()}_after_submit.png", full_page=True)
-        print("Saved. Screenshots saved. Check them to confirm.")
-        page.wait_for_timeout(3000)
-        ctx.close()
+    page.get_by_text(re.compile(r"^\s*(Mark|View / Edit)\s*$")).first.click()  # first time: Mark, later: View / Edit
+    page.wait_for_selector("table tbody tr")
 
+    # Set absentees (everyone else stays Present)
+    found = set()
+    rows = page.locator("table tbody tr")
+    total = rows.count()
+    for i in range(total):
+        row = rows.nth(i)
+        sn = row.locator("td").first.inner_text().strip()
+        if sn in absent:
+            row.locator("select").first.select_option(label="Absent")
+            found.add(sn)
 
-if __name__ == "__main__":
-    main()
+    if absent - found:
+        sys.exit(f"Sn. not found: {sorted(absent - found)}. Not saved.")
+
+    page.screenshot(path="attendance.png", full_page=True)
+    page.get_by_role("button", name="Save", exact=True).first.click()
+
+    # Verify the summary popup against what you asked for, then confirm
+    popup = page.get_by_text("Confirm Attendance Summary").locator(
+        "xpath=ancestor::*[.//button[contains(., 'Confirm')]][1]"
+    )
+    popup.wait_for()
+    text = popup.inner_text()
+    shown_absent = int(re.search(r"Absent\s+(\d+)", text).group(1))
+    shown_present = int(re.search(r"Present\s+(\d+)", text).group(1))
+    want_absent, want_present = len(found), total - len(found)
+    if (shown_absent, shown_present) != (want_absent, want_present):
+        sys.exit(
+            f"Popup shows Absent {shown_absent}, Present {shown_present} but expected "
+            f"Absent {want_absent}, Present {want_present}. NOT confirmed."
+        )
+    page.get_by_role("button", name="Confirm & Save").click()
+    page.wait_for_load_state("networkidle")
+    print(f"Saved. Absent: {sorted(found) or 'none'}")
