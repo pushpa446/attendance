@@ -1,96 +1,43 @@
-"""
+"""Mark attendance on the KVS Samagam portal. Login is done manually by you in Brave.
+
 Usage: python mark.py 27 29 32
 (27 29 32 = Sn. numbers of ABSENT students; none = all present)
-
-URL, LOGIN_ID and PASSWORD are read from the .env file next to this script.
 """
 import re
 import sys
 import time
-import shutil
 import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
+BRAVE = "/usr/bin/brave-browser"
+PROFILE_DIR = Path.home() / ".attendance-brave"  # keeps your login between runs
+DEBUG_PORT = 9222
+HOME_URL = "https://samagam.kvs.gov.in"
 
-def load_env(path):
-    env = {}
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, value = line.split("=", 1)
-            env[key.strip()] = value.strip().strip('"').strip("'")
-    return env
-
-
-env_file = Path(__file__).with_name(".env")
-if not env_file.exists():
-    sys.exit("Missing .env file. Copy .env.example to .env and fill it in.")
-env = load_env(env_file)
-URL, LOGIN_ID, PASSWORD = env.get("URL"), env.get("LOGIN_ID"), env.get("PASSWORD")
-if not (URL and LOGIN_ID and PASSWORD):
-    sys.exit(".env must contain URL, LOGIN_ID and PASSWORD.")
-host = urlparse(URL).netloc
+host = urlparse(HOME_URL).netloc
 absent = set(sys.argv[1:])
 
-brave = next(
-    (
-        b
-        for b in (
-            shutil.which("brave-browser"),
-            shutil.which("brave-browser-stable"),
-            shutil.which("brave"),
-            "/snap/bin/brave",
-            "/opt/brave.com/brave/brave-browser",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            str(Path.home() / "Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
-        )
-        if b and Path(b).exists()
-    ),
-    None,
-)
-if not brave:
-    sys.exit("Brave not found. Run: which brave brave-browser   and edit the path in mark.py")
-
 subprocess.Popen(
-    [
-        brave,
-        "--remote-debugging-port=9222",
-        f"--user-data-dir={Path.home() / '.attendance-chrome'}",
-        URL,
-    ],
+    [BRAVE, f"--remote-debugging-port={DEBUG_PORT}", f"--user-data-dir={PROFILE_DIR}", HOME_URL],
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
 )
 time.sleep(3)
 
 with sync_playwright() as p:
-    browser = p.chromium.connect_over_cdp("http://localhost:9222")
+    browser = p.chromium.connect_over_cdp(f"http://localhost:{DEBUG_PORT}")
     pages = [pg for c in browser.contexts for pg in c.pages if host in pg.url]
     if not pages:
         sys.exit("Portal tab not found in the Brave window.")
     page = pages[0]
     page.bring_to_front()
-
-    # Login (skipped if the saved Brave profile is already logged in)
     page.wait_for_load_state("domcontentloaded")
-    time.sleep(3)  # let redirects finish
-    login_box = page.get_by_placeholder("Enter Your Login ID")
-    print("Page:", page.url)
-    logged_in = any(k in page.url for k in ("/dashboard", "/dashboar", "/mis/")) or not (
-        login_box.count() and login_box.first.is_visible()
-    )
-    if logged_in:
-        print("Already logged in.")
-    else:
-        print("Not logged in, filling login form...")
-        login_box.first.fill(LOGIN_ID)
-        page.get_by_placeholder("Enter Your Password").fill(PASSWORD)
-        input("Wait for the verification to succeed, then press Enter to login... ")
-        page.get_by_role("button", name="Login").click()
-        page.wait_for_load_state("domcontentloaded")
-        time.sleep(3)
+
+    input("Log in manually in Brave (skip if already logged in), then press Enter here... ")
+    page.wait_for_load_state("domcontentloaded")
+    time.sleep(2)
     print("Opening attendance page...")
 
     # Go to attendance
